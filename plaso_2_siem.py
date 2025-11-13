@@ -17,8 +17,13 @@ from plaso_processors.lnk_processor import PlasoLnkProcessor
 from plaso_processors.prefetch_processor import PlasoPrefetchProcessor
 from plaso_processors.srum_processor import PlasoSrumProcessor
 from plaso_processors.browser_history_processor import PlasoBrowserHistoryProcessor
-from plaso_processors.amcache_processor import PlasoAmcacheProcessor  # <-- NOUVEL IMPORT
+from plaso_processors.amcache_processor import PlasoAmcacheProcessor
 from plaso_processors.generic_processor import PlasoGenericProcessor
+from plaso_processors.appcompatcache_processor import PlasoAppCompatCacheProcessor
+from plaso_processors.userassist_processor import PlasoUserAssistProcessor
+from plaso_processors.runkey_processor import PlasoRunKeyProcessor
+from plaso_processors.usb_processor import PlasoUsbProcessor
+from plaso_processors.mru_processor import PlasoMruProcessor
 
 
 class PlasoPipeline:
@@ -39,11 +44,16 @@ class PlasoPipeline:
 
         # Map des regex de parser Plaso (de notre ancien script)
         self.parser_regex_map = {
-            "srum": re.compile(r'esedb/srum'),  # Doit être avant 'db'
-            "amcache": re.compile(r'winreg/amcache'),  # <-- NOUVELLE REGEX (avant 'hive')
+            "srum": re.compile(r'esedb/srum'),
+            "amcache": re.compile(r'winreg/amcache'),
+            "appcompatcache": re.compile(r'appcompatcache'),
+            "runkey": re.compile(r'winreg/windows_run'),
+            "usb": re.compile(r'winreg/windows_usb_devices'),
+            "mru": re.compile(r'winreg/(bagmru|mrulistex)'),
+            "userassist": re.compile(r'userassist'),  # <-- NOUVELLE REGEX (avant 'hive')
             "browser_history": re.compile(r'(sqlite/((chrome|firefox|edge).*history))'),
             "evtx": re.compile(r'winevtx'),
-            "hive": re.compile(r'winreg'),
+            "hive": re.compile(r'winreg'),  # <-- Doit être APRÈS les 'winreg' spécifiques
             "db": re.compile(r'(sqlite)|(esedb)'),  # Fallback générique
             "lnk": re.compile(r'lnk'),
             "prefetch": re.compile(r'prefetch'),
@@ -54,10 +64,15 @@ class PlasoPipeline:
         # Initialiser et mapper les processeurs
         self.processors = {
             "srum": PlasoSrumProcessor(),
-            "amcache": PlasoAmcacheProcessor(),  # <-- NOUVEAU PROCESSEUR
+            "amcache": PlasoAmcacheProcessor(),
+            "appcompatcache": PlasoAppCompatCacheProcessor(),
+            "runkey": PlasoRunKeyProcessor(),
+            "usb": PlasoUsbProcessor(),
+            "mru": PlasoMruProcessor(),
+            "userassist": PlasoUserAssistProcessor(),  # <-- NOUVEAU PROCESSEUR
             "browser_history": PlasoBrowserHistoryProcessor(),
             "evtx": PlasoEvtxProcessor(),
-            "hive": PlasoRegistryProcessor(),
+            "hive": PlasoRegistryProcessor(),  # <-- Processeur générique pour le registre
             "mft": PlasoMftProcessor(),
             "lnk": PlasoLnkProcessor(),
             "prefetch": PlasoPrefetchProcessor(),
