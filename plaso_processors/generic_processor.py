@@ -5,32 +5,44 @@ from .base_processor import BaseEventProcessor
 
 
 class PlasoGenericProcessor(BaseEventProcessor):
-    """Processeur Plaso générique pour les événements 'other'."""
+    """
+    Processeur Plaso générique pour les événements 'other'.
+    Regroupe tous les événements non traités dans un index unique "other"
+    et stocke l'événement brut en tant que chaîne pour éviter tout conflit de mapping.
+    """
 
     def __init__(self):
-        print("  [*] Initialisation du processeur Générique")
+        print("  [*] Initialisation du processeur Générique (Mode: Raw String)")
 
     def process_event(self, event: dict) -> (dict, str):
-        """Traite un événement générique de Plaso."""
+        """
+        Traite un événement générique de Plaso en le stockant comme une chaîne brute.
+        """
         try:
-            # 1. Gestion du Timestamp (meilleur effort)
+            # 1. Créer un nouveau document propre
+            processed_doc = {}
+
+            # 2. Gestion du Timestamp (meilleur effort)
             dt_filetime = self._parse_filetime_to_dt(event.get("date_time", {}).get("timestamp"))
             if dt_filetime:
-                event["estimestamp"] = self._format_dt_to_es(dt_filetime)
+                processed_doc["estimestamp"] = self._format_dt_to_es(dt_filetime)
             else:
                 dt_plaso = self._parse_unix_micro_to_dt(event.get("timestamp"))
-                event["estimestamp"] = self._format_dt_to_es(dt_plaso)
+                processed_doc["estimestamp"] = self._format_dt_to_es(dt_plaso)
 
-            # 2. Nettoyage
-            self.drop_useless_fields(event)
+            # 3. Stocker l'événement brut (déjà au format string)
+            # 'event_raw_string' est ajouté dans la pipeline principale (plaso_2_elk.py)
+            processed_doc["event_raw_string"] = event.get("event_raw_string")
 
-            # 3. Clé d'index
-            # Essayer d'obtenir un type plus spécifique à partir de data_type
-            data_type = event.get('data_type', 'other').replace(':', '_').replace('.', '_')
-            index_key = f"other_{data_type}"
+            # 4. (Optionnel mais utile) Stocker le data_type et le parser pour le filtrage
+            processed_doc["data_type"] = event.get("data_type")
+            processed_doc["parser"] = event.get("parser")
 
-            return event, index_key
+            # 5. Clé d'index (statique)
+            index_key = "other"
+
+            return processed_doc, index_key
 
         except Exception as e:
             # print(f"[ERREUR] Échec de process_generic_event: {e}")
-            return self.drop_useless_fields(event), "other"
+            return {"message": f"Generic processing failed: {e}", "raw_event": event.get("event_raw_string")}, "other"

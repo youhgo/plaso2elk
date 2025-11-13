@@ -14,12 +14,12 @@ from plaso_processors.evtx_processor import PlasoEvtxProcessor
 from plaso_processors.registry_processor import PlasoRegistryProcessor
 from plaso_processors.mft_processor import PlasoMftProcessor
 from plaso_processors.lnk_processor import PlasoLnkProcessor
+from plaso_processors.prefetch_processor import PlasoPrefetchProcessor
+from plaso_processors.srum_processor import PlasoSrumProcessor
+from plaso_processors.browser_history_processor import PlasoBrowserHistoryProcessor
+from plaso_processors.amcache_processor import PlasoAmcacheProcessor  # <-- NOUVEL IMPORT
 from plaso_processors.generic_processor import PlasoGenericProcessor
 
-# TODO
-# Amcache
-# Appcompat
-#
 
 class PlasoPipeline:
     """
@@ -29,7 +29,7 @@ class PlasoPipeline:
 
     def __init__(self, case_name, machine_name, timeline_path, es_hosts, es_user, es_pass, chunk_size, verify_ssl):
         self.case_name = self._sanitize_for_index(case_name)
-        self.machine_name = self._sanitize_for_index(machine_name)
+        self.machine_name = machine_name.lower().replace(" ", "_")
         self.timeline_path = timeline_path
         self.chunk_size = chunk_size
         self.index_prefix = f"{self.case_name}_{self.machine_name}"
@@ -39,9 +39,12 @@ class PlasoPipeline:
 
         # Map des regex de parser Plaso (de notre ancien script)
         self.parser_regex_map = {
+            "srum": re.compile(r'esedb/srum'),  # Doit être avant 'db'
+            "amcache": re.compile(r'winreg/amcache'),  # <-- NOUVELLE REGEX (avant 'hive')
+            "browser_history": re.compile(r'(sqlite/((chrome|firefox|edge).*history))'),
             "evtx": re.compile(r'winevtx'),
             "hive": re.compile(r'winreg'),
-            "db": re.compile(r'(sqlite)|(esedb)'),
+            "db": re.compile(r'(sqlite)|(esedb)'),  # Fallback générique
             "lnk": re.compile(r'lnk'),
             "prefetch": re.compile(r'prefetch'),
             "winFile": re.compile(r'(lnk)|(text)|(prefetch)'),
@@ -50,21 +53,22 @@ class PlasoPipeline:
 
         # Initialiser et mapper les processeurs
         self.processors = {
+            "srum": PlasoSrumProcessor(),
+            "amcache": PlasoAmcacheProcessor(),  # <-- NOUVEAU PROCESSEUR
+            "browser_history": PlasoBrowserHistoryProcessor(),
             "evtx": PlasoEvtxProcessor(),
             "hive": PlasoRegistryProcessor(),
             "mft": PlasoMftProcessor(),
             "lnk": PlasoLnkProcessor(),
+            "prefetch": PlasoPrefetchProcessor(),
             "other": PlasoGenericProcessor()
-            # Ajoutez d'autres processeurs ici (prefetch, etc.)
         }
         print("[*] Processeurs initialisés.")
 
     def _sanitize_for_index(self, name: str) -> str:
-        """Nettoie un nom pour être compatible avec les index Elasticsearch."""
         return ''.join(c if c.isalnum() or c in '-_' else '_' for c in name).lower()
 
     def identify_artefact_type(self, event: dict) -> str:
-        """Identifie le type d'artefact en se basant sur le champ 'parser' de Plaso."""
         parser = event.get("parser", "")
         for key, value_regex in self.parser_regex_map.items():
             if re.search(value_regex, parser):
@@ -72,10 +76,9 @@ class PlasoPipeline:
         return "other"
 
     def run(self):
-        """Lance l'ensemble du processus de traitement et d'envoi."""
         print("\n--- CONFIGURATION ---")
         print(f"  Fichier Timeline : {self.timeline_path}")
-        print(f"  Préfixe d'Index : {self.index_prefix}")
+        print(f"  Index Prefix     : {self.index_prefix}")
         print(f"  Taille des Lots  : {self.chunk_size}")
         print("---------------------\n")
 
@@ -84,16 +87,13 @@ class PlasoPipeline:
         self.uploader.streaming_bulk_upload(actions_generator, self.chunk_size)
 
     def _process_timeline_file(self):
-        """
-        Générateur qui lit le fichier timeline, traite chaque ligne
-        et la transforme en action "bulk" pour Elasticsearch.
-        """
         print(f"[*] Début de la lecture du fichier timeline : {self.timeline_path}")
         it = 0
         try:
             with open(self.timeline_path, 'r', encoding='utf-8') as f:
                 for line in f:
                     it += 1
+
                     if it % (self.chunk_size * 10) == 0:  # Log de progression
                         print(f"    ... Ligne {it} atteinte")
 
@@ -113,7 +113,6 @@ class PlasoPipeline:
                         processor = self.processors.get(artefact_type, self.processors["other"])
 
                         # 4. Traiter l'événement
-                        # Le processeur retourne (doc_modifié, clef_index)
                         processed_doc, index_type_key = processor.process_event(event)
 
                         # 5. Construire le nom final de l'index
@@ -145,7 +144,6 @@ class PlasoPipeline:
 
 
 def parse_arguments():
-    """Définit et parse les arguments de la ligne de commande."""
     parser = argparse.ArgumentParser(
         description="Processeur de timeline Plaso (jsonl) pour envoi vers Elasticsearch.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
@@ -162,6 +160,8 @@ def parse_arguments():
                         help="Hôte(s) Elasticsearch, séparés par des virgules.")
     parser.add_argument("--es-user", default="elastic", help="Nom d'utilisateur pour Elasticsearch.")
     parser.add_argument("--es-pass", default="changeme", help="Mot de passe pour Elasticsearch.")
+
+    # --chunk-size
     parser.add_argument("--chunk-size", type=int, default=1000, help="Nombre de documents à envoyer par lot.")
 
     # MODIFIÉ: La vérification SSL est DÉSACTIVÉE par défaut
