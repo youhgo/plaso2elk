@@ -30,15 +30,8 @@ class PlasoGenericProcessor(BaseEventProcessor):
                 dt_plaso = self._parse_unix_micro_to_dt(event.get("timestamp"))
                 processed_doc["estimestamp"] = self._format_dt_to_es(dt_plaso)
 
-            # 3. Stocker l'événement brut (déjà au format string)
-            # 'event_raw_string' est ajouté dans la pipeline principale (plaso_2_elk.py)
-            processed_doc["event_raw_string"] = event.get("event_raw_string")
-
-            # 4. (Optionnel mais utile) Stocker le data_type et le parser pour le filtrage
             processed_doc["data_type"] = event.get("data_type")
             processed_doc["parser"] = event.get("parser")
-
-            # 5. Clé d'index (statique)
             index_key = "other"
 
             return processed_doc, index_key

@@ -15,15 +15,13 @@ class BaseEventProcessor:
         """Méthode de traitement principale pour un événement Plaso."""
         raise NotImplementedError("La méthode process_event doit être implémentée par la sous-classe.")
 
-    # --- Fonctions Utilitaires (Anciennement dans PlasoToELK) ---
-
     @staticmethod
     def drop_useless_fields(event: dict):
         """
         Supprime les champs Plaso "verbeux" et redondants pour nettoyer le document final.
         Modifie l'événement sur place.
         """
-        # MODIFIÉ: "message" est de retour dans la liste de suppression globale
+
         l_field_to_drop = [
             "__container_type__",
             "__type__",
@@ -33,21 +31,18 @@ class BaseEventProcessor:
             "inode",
             "pathspec",
             "strings",
-            "message",  # <-- Rétabli
             "xml_string",
             "event_version",
             "message_identifier",
             "offset",
             "provider_identifier",
             "recovered",
-            "timestamp"  # Remplacé par 'estimestamp'
+            "timestamp"
         ]
 
         for field in l_field_to_drop:
             event.pop(field, None)
         return event
-
-    # --- Fonctions Utilitaires de Timestamp (Anciennement dans PlasoToELK) ---
 
     @staticmethod
     def _parse_filetime_to_dt(filetime_int):
@@ -89,7 +84,6 @@ class BaseEventProcessor:
             return datetime.strptime(iso_string, '%Y-%m-%dT%H:%M:%S.%f%z')
         except ValueError:
             try:
-                # Essayer sans microsecondes
                 return datetime.strptime(iso_string, '%Y-%m-%dT%H:%M:%S%z')
             except Exception:
                 return None  # Échec de l'analyse

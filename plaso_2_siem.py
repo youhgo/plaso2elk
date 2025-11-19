@@ -8,7 +8,6 @@ import os
 import traceback
 from elastic_uploader import ElasticUploader
 
-# Importer les nouveaux processeurs
 from plaso_processors.base_processor import BaseEventProcessor
 from plaso_processors.evtx_processor import PlasoEvtxProcessor
 from plaso_processors.registry_processor import PlasoRegistryProcessor
@@ -39,10 +38,8 @@ class PlasoPipeline:
         self.chunk_size = chunk_size
         self.index_prefix = f"{self.case_name}_{self.machine_name}"
 
-        # Initialiser l'uploader
         self.uploader = ElasticUploader(es_hosts, es_user, es_pass, verify_ssl)
 
-        # Map des regex de parser Plaso (de notre ancien script)
         self.parser_regex_map = {
             "srum": re.compile(r'esedb/srum'),
             "amcache": re.compile(r'winreg/amcache'),
@@ -61,7 +58,6 @@ class PlasoPipeline:
             "mft": re.compile(r'(filestat)|(usnjrnl)|(mft)')
         }
 
-        # Initialiser et mapper les processeurs
         self.processors = {
             "srum": PlasoSrumProcessor(),
             "amcache": PlasoAmcacheProcessor(),
@@ -69,10 +65,10 @@ class PlasoPipeline:
             "runkey": PlasoRunKeyProcessor(),
             "usb": PlasoUsbProcessor(),
             "mru": PlasoMruProcessor(),
-            "userassist": PlasoUserAssistProcessor(),  # <-- NOUVEAU PROCESSEUR
+            "userassist": PlasoUserAssistProcessor(),
             "browser_history": PlasoBrowserHistoryProcessor(),
             "evtx": PlasoEvtxProcessor(),
-            "hive": PlasoRegistryProcessor(),  # <-- Processeur générique pour le registre
+            "hive": PlasoRegistryProcessor(),
             "mft": PlasoMftProcessor(),
             "lnk": PlasoLnkProcessor(),
             "prefetch": PlasoPrefetchProcessor(),
@@ -111,29 +107,17 @@ class PlasoPipeline:
 
                     if it % (self.chunk_size * 10) == 0:  # Log de progression
                         print(f"    ... Ligne {it} atteinte")
-
                     stripped_line = line.strip()
                     if not stripped_line:
                         continue
-
                     try:
-                        # 1. Charger la ligne JSON
                         event = json.loads(stripped_line)
-                        event["event_raw_string"] = stripped_line  # Garder la source brute
-
-                        # 2. Identifier le type
+                        event["event_raw_string"] = stripped_line
                         artefact_type = self.identify_artefact_type(event)
-
-                        # 3. Obtenir le bon processeur
                         processor = self.processors.get(artefact_type, self.processors["other"])
-
-                        # 4. Traiter l'événement
                         processed_doc, index_type_key = processor.process_event(event)
-
-                        # 5. Construire le nom final de l'index
                         index_name = f"{self.index_prefix}_{index_type_key}"
 
-                        # 6. Générer l'action pour le bulk uploader
                         yield {
                             "_index": index_name,
                             "_source": processed_doc
@@ -163,23 +147,16 @@ def parse_arguments():
         description="Processeur de timeline Plaso (jsonl) pour envoi vers Elasticsearch.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    # Arguments de Plaso
     parser.add_argument("-t", "--timeline", required=True,
                         help="Chemin vers le fichier timeline Plaso au format JSON Lines (jsonl).")
     parser.add_argument("-c", "--case-name", required=True, help="Nom du cas (utilisé dans le nom de l'index).")
     parser.add_argument("-m", "--machine-name", required=True,
                         help="Nom de la machine (utilisé dans le nom de l'index).")
-
-    # Arguments d'Elasticsearch (de votre script)
     parser.add_argument("--es-hosts", default="https://localhost:9200",
                         help="Hôte(s) Elasticsearch, séparés par des virgules.")
     parser.add_argument("--es-user", default="elastic", help="Nom d'utilisateur pour Elasticsearch.")
     parser.add_argument("--es-pass", default="changeme", help="Mot de passe pour Elasticsearch.")
-
-    # --chunk-size
     parser.add_argument("--chunk-size", type=int, default=1000, help="Nombre de documents à envoyer par lot.")
-
-    # MODIFIÉ: La vérification SSL est DÉSACTIVÉE par défaut
     parser.add_argument("--verify-ssl", action="store_true", dest="verify_ssl", default=False,
                         help="Active la vérification du certificat SSL (désactivée par défaut).")
     return parser.parse_args()
@@ -205,3 +182,52 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\n[ERREUR INATTENDUE] Une erreur est survenue : {e}")
         traceback.print_exc()
+
+
+"""
+parsers
+parser": "custom_destinations/lnk"
+parser": "custom_destinations/lnk/shell_items"
+parser": "esedb/msie_webcache"
+parser": "esedb/srum"
+parser": "filestat"
+parser": "lnk"
+parser": "lnk/shell_items"
+parser": "mft"
+parser": "olecf/olecf_automatic_destinations"
+parser": "olecf/olecf_automatic_destinations/lnk"
+parser": "olecf/olecf_automatic_destinations/lnk/shell_items"
+parser": "olecf/olecf_default"
+parser": "onedrive_log"
+parser": "pe"
+parser": "prefetch"
+parser": "sqlite/chrome_27_history"
+parser": "sqlite/windows_timeline"
+parser": "text/setupapi"
+parser": "utmp"
+parser": "winevtx"
+parser": "winreg/amcache"
+parser": "winreg/appcompatcache"
+parser": "winreg/bagmru"
+parser": "winreg/bagmru/shell_items"
+parser": "winreg/bam"
+parser": "winreg/explorer_mountpoints2"
+parser": "winreg/explorer_programscache"
+parser": "winreg/mrulistex_string"
+parser": "winreg/mrulistex_string_and_shell_item"
+parser": "winreg/mrulist_string"
+parser": "winreg/msie_zone"
+parser": "winreg/networks"
+parser": "winreg/userassist"
+parser": "winreg/windows_boot_execute"
+parser": "winreg/windows_run"
+parser": "winreg/windows_sam_users"
+parser": "winreg/windows_services"
+parser": "winreg/windows_shutdown"
+parser": "winreg/windows_task_cache"
+parser": "winreg/windows_timezone"
+parser": "winreg/windows_typed_urls"
+parser": "winreg/windows_version"
+parser": "winreg/winlogon"
+parser": "winreg/winreg_default"
+"""

@@ -156,8 +156,14 @@ class EvtxHandler:
             parent_pid = 0
         doc.update({"event": {**doc["event"], "action": "process_started", "type": "start"},
                     "process": {"executable": data.get("NewProcessName"),
-                                "name": os.path.basename(data.get("NewProcessName", "")), "pid": pid,
-                                "command_line": data.get("CommandLine"), "parent": {"pid": parent_pid}}})
+                                "name": os.path.basename(data.get("NewProcessName", "")),
+                                "pid": pid,
+                                "command_line": data.get("CommandLine"),
+                                "parent": {"pid": parent_pid,
+                                           "ParentProcessName": data.get("ParentProcessName")
+                                           }
+                                }
+                    })
         return doc
 
     def handle_user_modification(self, raw_log: dict) -> dict:
