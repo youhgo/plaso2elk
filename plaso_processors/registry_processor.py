@@ -75,7 +75,7 @@ class PlasoRegistryProcessor(BaseEventProcessor):
                     processed_doc["reg_value_name"] = value_entry.get("name")
                     processed_doc["reg_value_data"] = value_entry.get("data")
                     processed_doc["reg_value_type"] = value_entry.get("data_type")
-                    processed_doc["message"] = event.get("message")
+                    #processed_doc["message"] = event.get("message")
                     # Nettoyage final du document généré
                     self.drop_useless_fields(processed_doc)
 
