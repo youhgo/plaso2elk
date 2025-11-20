@@ -23,11 +23,7 @@ class PlasoUserAssistProcessor(BaseEventProcessor):
 
             if dt_filetime:
                 event["estimestamp"] = self._format_dt_to_es(dt_filetime)
-                # Notons que Plaso crée des événements séparés.
-                # Celui avec le 'timestamp_desc' == 'Last Execution Time'
-                # aura le bon temps dans 'timestamp' (unix micro).
-                # Celui avec 'Last Updated' aura le bon temps dans 'date_time' (filetime).
-                # En priorisant 'date_time', nous suivons la convention des autres processeurs.
+
             else:
                 dt_plaso = self._parse_unix_micro_to_dt(event.get("timestamp"))
                 event["estimestamp"] = self._format_dt_to_es(dt_plaso)
@@ -37,9 +33,6 @@ class PlasoUserAssistProcessor(BaseEventProcessor):
                 event["userassist_timestamp_type"] = event.pop("timestamp_desc")
 
             # 3. Nettoyage
-            # Les champs 'value_name', 'application_focus_count', 'application_focus_duration'
-            # (inspirés de MPP) seront conservés car ils ne sont pas dans la liste
-            # 'drop_useless_fields' de la classe de base.
             self.drop_useless_fields(event)
 
             # 4. Clé d'index

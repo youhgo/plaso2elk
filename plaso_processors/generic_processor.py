@@ -7,7 +7,7 @@ from .base_processor import BaseEventProcessor
 class PlasoGenericProcessor(BaseEventProcessor):
     """
     Processeur Plaso générique pour les événements 'other'.
-    Regroupe tous les événements non traités dans un index unique "other"
+    Regroupe tous les événements non traités dans un index unique "others"
     et stocke l'événement brut en tant que chaîne pour éviter tout conflit de mapping.
     """
 
@@ -32,6 +32,7 @@ class PlasoGenericProcessor(BaseEventProcessor):
 
             processed_doc["data_type"] = event.get("data_type")
             processed_doc["parser"] = event.get("parser")
+            # Clé spécifique rétablie
             index_key = "other"
 
             return processed_doc, index_key

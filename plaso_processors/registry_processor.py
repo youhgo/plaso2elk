@@ -6,11 +6,14 @@ from .base_processor import BaseEventProcessor
 
 
 class PlasoRegistryProcessor(BaseEventProcessor):
-    """Processeur Plaso pour les événements de Registre (winreg)."""
+    """
+    Processeur Plaso pour les événements de Registre (winreg).\n
+    MODIFIÉ: Dénormalise les événements winreg_default (qui contiennent la liste 'values')\n
+    en créant un document ELK pour chaque valeur de Registre trouvée.\n
+    """
 
     def __init__(self):
         print("  [*] Initialisation du processeur Registre")
-        # Copié de plaso_2_siem.py
         self.HIVE_FILE_MAP = {
             r'SOFTWARE': "software",
             r'SYSTEM': "system",
@@ -27,42 +30,76 @@ class PlasoRegistryProcessor(BaseEventProcessor):
                 return log_type
         return None
 
-    def process_event(self, event: dict) -> (dict, str):
-        """Traite un événement de Registre de Plaso."""
-        try:
-            # 1. Identifier le type de hive
-            filename = event.get("filename", "")
-            specific_type = self.get_specific_hive_type(filename)
-            if specific_type:
-                # Ajoute le champ 'hive_type' (votre demande)
-                event["hive_type"] = specific_type
+    def process_event(self, event: dict):  # -> (dict, str) ou Generator
+        """
+        Traite un événement de Registre de Plaso. Retourne un générateur de documents (dict, str).
+        """
 
-            # 2. Logique de Timestamp (le FILETIME est roi)
+        # 1. Pré-traitement du Timestamp et de la Hive
+        try:
             dt_filetime = self._parse_filetime_to_dt(event.get("date_time", {}).get("timestamp"))
             if dt_filetime:
-                event["estimestamp"] = self._format_dt_to_es(dt_filetime)
+                es_timestamp = self._format_dt_to_es(dt_filetime)
             else:
-                # Fallback sur le timestamp plaso
                 dt_plaso = self._parse_unix_micro_to_dt(event.get("timestamp"))
-                event["estimestamp"] = self._format_dt_to_es(dt_plaso)
+                es_timestamp = self._format_dt_to_es(dt_plaso)
 
-            # 3. Simplifier les valeurs
+            filename = event.get("filename", "")
+            specific_type = self.get_specific_hive_type(filename)
+
+            base_doc = {
+                "estimestamp": es_timestamp,
+                "key_path": event.get("key_path"),
+                "filename": filename,
+                "parser": event.get("parser"),
+                "data_type": event.get("data_type"),
+                "hive_type": specific_type if specific_type else "unknown_hive"
+            }
+
             values = event.get("values")
-            if isinstance(values, list) and len(values) == 1:
-                value_obj = values[0]
-                # Gérer les valeurs par défaut (sans nom)
-                if value_obj.get("name") == "":
-                    event["value_data"] = value_obj.get("data")
-                    event["value_type"] = value_obj.get("data_type")
-                    event.pop("values", None)
 
-            # 4. Nettoyage
+            # 2. Cas de Dénormalisation (Liste de valeurs)
+            # L'événement contient le champ 'values', il faut le décomposer
+            if isinstance(values, list) and len(values) > 0:
+
+                # Supprimer la liste des valeurs originales pour ne pas l'indexer
+                event.pop("values", None)
+
+                for value_entry in values:
+                    if not isinstance(value_entry, dict):
+                        continue
+
+                    processed_doc = base_doc.copy()
+
+                    # Champs spécifiques à la valeur
+                    processed_doc["reg_value_name"] = value_entry.get("name")
+                    processed_doc["reg_value_data"] = value_entry.get("data")
+                    processed_doc["reg_value_type"] = value_entry.get("data_type")
+                    processed_doc["message"] = event.get("message")
+                    # Nettoyage final du document généré
+                    self.drop_useless_fields(processed_doc)
+
+                    yield processed_doc, "hive"
+
+                return  # Termine la fonction après le yield
+
+            # 3. Cas Standard (Clé sans liste 'values' ou liste vide)
+            # Dans ce cas, nous renvoyons simplement l'événement de clé unique (LastWriteTime)
+
+            # Tente de supprimer l'ancienne simplification du point 3 du code précédent (si elle existait)
+            event.pop("value_data", None)
+            event.pop("value_type", None)
+
+            # S'assurer que le document final de la clé soit propre
+            event.update(base_doc)
             self.drop_useless_fields(event)
 
-            # 5. Clé d'index (MODIFIÉ: Utilise un index unique "hive")
-            index_key = "hive"
-            return event, index_key
+            return event, "hive"
 
         except Exception as e:
-            # print(f"[ERREUR] Échec de process_registry_event: {e}")
-            return self.drop_useless_fields(event), "hive_other"
+            # En cas d'erreur de traitement, on retourne un document d'erreur clair
+            error_doc = {
+                "message": f"Registry key parsing failed: {e}",
+                "raw_event_line": event.get("event_raw_string")
+            }
+            return error_doc, "hive"

@@ -63,11 +63,11 @@ class PlasoSrumProcessor(BaseEventProcessor):
                 # seront tous convertis en string et stockés.
                 processed_doc[key] = str(value)
 
-            # 5. Clé d'index
+            # 5. Clé d'index - Clé spécifique rétablie
             index_key = 'srum'
 
             return processed_doc, index_key
 
         except Exception as e:
             # print(f"[ERREUR] Échec de process_srum_event: {e}")
-            return {"message": f"SRUM parsing failed: {e}"}, "srum_other"
+            return {"message": f"SRUM parsing failed: {e}"}, "srum"
