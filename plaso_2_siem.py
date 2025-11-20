@@ -37,7 +37,7 @@ class PlasoPipeline:
         self.machine_name = machine_name.lower().replace(" ", "_")
         self.timeline_path = timeline_path
         self.chunk_size = chunk_size
-        self.index_prefix = f"{self.case_name}_{self.machine_name}"
+        self.index_prefix = f"plaso_{self.case_name}_{self.machine_name}"
 
         self.uploader = ElasticUploader(es_hosts, es_user, es_pass, verify_ssl)
 
