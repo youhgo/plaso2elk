@@ -32,14 +32,17 @@ class PlasoPipeline:
     parsés à Elasticsearch via des processeurs dédiés.
     """
 
-    def __init__(self, case_name, machine_name, timeline_path, es_hosts, es_user, es_pass, chunk_size, verify_ssl):
+    def __init__(self, case_name, machine_name, timeline_path, es_hosts, es_user, es_pass, chunk_size, verify_ssl,
+                 es_timeout, thread_count, upload_mode):
         self.case_name = self._sanitize_for_index(case_name)
         self.machine_name = machine_name.lower().replace(" ", "_")
         self.timeline_path = timeline_path
         self.chunk_size = chunk_size
+        # MISE À JOUR : Ajout du préfixe 'plaso_'
         self.index_prefix = f"plaso_{self.case_name}_{self.machine_name}"
 
-        self.uploader = ElasticUploader(es_hosts, es_user, es_pass, verify_ssl)
+        # Passage du timeout, thread_count et mode d'upload au client Elasticsearch
+        self.uploader = ElasticUploader(es_hosts, es_user, es_pass, verify_ssl, es_timeout, thread_count, upload_mode)
 
         # MAPPING VERS LES NOUVEAUX INDEX PLUS LARGES
         # La clé est le type d'artefact (pour sélectionner le bon processeur)
@@ -126,6 +129,7 @@ class PlasoPipeline:
         print(f"  Fichier Timeline : {self.timeline_path}")
         print(f"  Index Prefix     : {self.index_prefix}")
         print(f"  Taille des Lots  : {self.chunk_size}")
+        print(f"  Mode d'Upload    : {self.uploader.upload_mode.upper()}")
         print("---------------------\n")
 
         # Générer et envoyer les actions
@@ -133,15 +137,16 @@ class PlasoPipeline:
 
         # Mettre en place les templates ES pour les nouvelles catégories
         self.uploader.setup_templates(
-            evtx=f"{self.index_prefix}_evtx",
-            hive=f"{self.index_prefix}_hive",
-            process=f"{self.index_prefix}_process",
-            files=f"{self.index_prefix}_files",
-            browser_artefacts=f"{self.index_prefix}_browser_artefacts",
-            others=f"{self.index_prefix}_others"
+            evtx=f"{self.index_prefix}_evtx*",
+            hive=f"{self.index_prefix}_hive*",
+            process=f"{self.index_prefix}_process*",
+            files=f"{self.index_prefix}_files*",
+            browser_artefacts=f"{self.index_prefix}_browser_artefacts*",
+            others=f"{self.index_prefix}_others*"
         )
 
-        self.uploader.streaming_bulk_upload(actions_generator, self.chunk_size)
+        # Appel de la fonction bulk_upload (qui gère parallel ou streaming)
+        self.uploader.bulk_upload(actions_generator, self.chunk_size)
 
     def _process_timeline_file(self):
         print(f"[*] Début de la lecture du fichier timeline : {self.timeline_path}")
@@ -163,16 +168,15 @@ class PlasoPipeline:
                         artefact_type_key = self.identify_artefact_type(event)
                         processor = self.processors.get(artefact_type_key, self.processors["other"])
 
-                        # Le résultat peut être un générateur (MRU) ou un tuple unique (les autres)
+                        # Le résultat peut être un générateur (MRU, Registry) ou un tuple unique (les autres)
                         processor_result = processor.process_event(event)
 
                         # CORRECTION FINALE : Distinguer le générateur du tuple simple.
-                        # Le PlasoMftProcessor renvoie un tuple de 2, qui est aussi un itérable.
                         if isinstance(processor_result, GeneratorType):
-                            # C'est un générateur (cas MRU dénormalisé)
+                            # C'est un générateur (cas MRU/Registry dénormalisé)
                             events_to_yield = processor_result
                         elif isinstance(processor_result, tuple) and len(processor_result) == 2:
-                            # C'est un tuple simple (document, clé_specifique) - C'est le cas MFT, LNK, etc.
+                            # C'est un tuple simple (document, clé_specifique) - Cas MFT, LNK, EVTX, etc.
                             events_to_yield = [processor_result]
                         else:
                             # Cas d'erreur : le processeur a retourné un type incorrect.
@@ -258,6 +262,12 @@ def parse_arguments():
     parser.add_argument("--chunk-size", type=int, default=1000, help="Nombre de documents à envoyer par lot.")
     parser.add_argument("--verify-ssl", action="store_true", dest="verify_ssl", default=False,
                         help="Active la vérification du certificat SSL (désactivée par défaut).")
+    parser.add_argument("--es-timeout", type=int, default=60,
+                        help="Délai d'attente de lecture pour la connexion Elasticsearch (en secondes).")
+    parser.add_argument("--thread-count", type=int, default=4,
+                        help="Nombre de threads à utiliser pour l'envoi en parallèle (utilisé seulement si --mode=parallel).")
+    parser.add_argument("--mode", choices=['parallel', 'streaming'], default='parallel',
+                        help="Mode d'envoi à Elasticsearch : 'parallel' (plus rapide) ou 'streaming' (séquentiel, plus sûr).")
     return parser.parse_args()
 
 
@@ -273,7 +283,10 @@ if __name__ == "__main__":
             es_user=args.es_user,
             es_pass=args.es_pass,
             chunk_size=args.chunk_size,
-            verify_ssl=args.verify_ssl
+            verify_ssl=args.verify_ssl,
+            es_timeout=args.es_timeout,  # Passage de l'argument timeout
+            thread_count=args.thread_count,  # Passage du nombre de threads
+            upload_mode=args.mode  # Passage du mode d'upload
         )
         pipeline.run()
     except (ConnectionError) as e:
