@@ -129,8 +129,18 @@ class EvtxHandler:
     def handle_security_logon_fail(self, raw_log: dict) -> dict:
         doc = self._create_base_document(raw_log)
         data = self._get_event_data(raw_log)
-        failure_reasons = {"0xc000006a": "Incorrect password", "0xc0000072": "Account disabled"}
-        status_code = data.get("Status", "").lower()
+        failure_reasons = {"0xc000006A": "STATUS_WRONG_PASSWORD",
+                           "0xc0000072": "STATUS_ACCOUNT_DISABLED",
+                           "0xC000006A":"STATUS_WRONG_PASSWORD",
+                           "0xC0000064":"STATUS_NO_SUCH_USER",
+                           "0xC0000234": "STATUS_ACCOUNT_LOCKED_OUT",
+                           "0xC000006F": "STATUS_ACCOUNT_RESTRICTION",
+                           "0xC0000133": "STATUS_TIME_DIFFERENCE_TOO_LARGE",
+                           "0xC000019C": "STATUS_LOGON_TYPE_NOT_GRANTED",
+                           "0xC0000071": "STATUS_PASSWORD_EXPIRED",
+                           "0xC00000E5": "STATUS_UNKNOWN_LOGON_SESSION"
+        }
+        status_code = data.get("Status", "").upper()
         failure_text = failure_reasons.get(status_code, status_code)
         try:
             port = int(data.get("IpPort")) if data.get("IpPort") not in ["-", "0"] else None

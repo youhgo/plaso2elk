@@ -58,9 +58,6 @@ class PlasoSrumProcessor(BaseEventProcessor):
                 if value is None:
                     continue
 
-                # Convertir tout le reste en string
-                # 'application', 'user_identifier', 'foreground_bytes_read', 'message', 'data_type'
-                # seront tous convertis en string et stockés.
                 processed_doc[key] = str(value)
 
             # 5. Clé d'index - Clé spécifique rétablie

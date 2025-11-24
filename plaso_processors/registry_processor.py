@@ -7,9 +7,9 @@ from .base_processor import BaseEventProcessor
 
 class PlasoRegistryProcessor(BaseEventProcessor):
     """
-    Processeur Plaso pour les événements de Registre (winreg).\n
-    MODIFIÉ: Dénormalise les événements winreg_default (qui contiennent la liste 'values')\n
-    en créant un document ELK pour chaque valeur de Registre trouvée.\n
+    Processeur Plaso pour les événements de Registre (winreg).
+    MODIFIÉ: Dénormalise les événements winreg_default (qui contiennent la liste 'values')
+    ET parse les configurations spécifiques comme TimeZoneInformation.
     """
 
     def __init__(self):
@@ -22,6 +22,8 @@ class PlasoRegistryProcessor(BaseEventProcessor):
             r'NTUSER\.DAT': "ntuser",
             r'UsrClass\.dat': "usrclass"
         }
+        # Regex pour parser la chaîne de configuration TimeZone (Clé: Valeur)
+        self.tz_config_regex = re.compile(r'([a-zA-Z0-9]+):\s*([^:]+)(?=\s+[a-zA-Z0-9]+:|$)')
 
     def get_specific_hive_type(self, original_filename):
         if not original_filename: return None
@@ -57,47 +59,58 @@ class PlasoRegistryProcessor(BaseEventProcessor):
             }
 
             values = event.get("values")
+            configuration = event.get("configuration")
 
-            # 2. Cas de Dénormalisation (Liste de valeurs)
-            # L'événement contient le champ 'values', il faut le décomposer
+            # 2. Cas de Dénormalisation (Liste de valeurs - winreg_default)
             if isinstance(values, list) and len(values) > 0:
-
-                # Supprimer la liste des valeurs originales pour ne pas l'indexer
                 event.pop("values", None)
-
                 for value_entry in values:
                     if not isinstance(value_entry, dict):
                         continue
-
                     processed_doc = base_doc.copy()
-
-                    # Champs spécifiques à la valeur
                     processed_doc["reg_value_name"] = value_entry.get("name")
                     processed_doc["reg_value_data"] = value_entry.get("data")
                     processed_doc["reg_value_type"] = value_entry.get("data_type")
-                    #processed_doc["message"] = event.get("message")
-                    # Nettoyage final du document généré
+                    # Optionnel : Inclure le message global si nécessaire (sans troncature)
+                    # processed_doc["message"] = event.get("message", "")
                     self.drop_useless_fields(processed_doc)
-
                     yield processed_doc, "hive"
+                return
 
-                return  # Termine la fonction après le yield
+            # 3. Cas de Dénormalisation Spécifique (TimeZone Configuration)
+            # Si on a une chaîne 'configuration' mais pas de 'values', on tente de la parser
+            if configuration and isinstance(configuration, str) and "TimeZoneKeyName" in configuration:
+                matches = self.tz_config_regex.findall(configuration)
+                if matches:
+                    for key, value in matches:
+                        processed_doc = base_doc.copy()
+                        processed_doc["reg_value_name"] = key.strip()
+                        processed_doc["reg_value_data"] = value.strip()
+                        processed_doc["reg_value_type"] = "ConfigString"  # Type artificiel
+                        self.drop_useless_fields(processed_doc)
+                        yield processed_doc, "hive"
+                    return
 
-            # 3. Cas Standard (Clé sans liste 'values' ou liste vide)
-            # Dans ce cas, nous renvoyons simplement l'événement de clé unique (LastWriteTime)
+            # 4. Cas Standard (Clé simple sans liste 'values')
+            # Dans ce cas, nous renvoyons simplement l'événement de clé unique
+            # mais nous conservons le message/configuration s'il est important
 
-            # Tente de supprimer l'ancienne simplification du point 3 du code précédent (si elle existait)
+            if configuration:
+                base_doc["reg_configuration_raw"] = configuration
+
+            # On garde le message s'il n'est pas vide (SANS TRONCATURE)
+            if event.get("message"):
+                base_doc["message"] = event.get("message")
+
             event.pop("value_data", None)
             event.pop("value_type", None)
 
-            # S'assurer que le document final de la clé soit propre
             event.update(base_doc)
             self.drop_useless_fields(event)
 
             return event, "hive"
 
         except Exception as e:
-            # En cas d'erreur de traitement, on retourne un document d'erreur clair
             error_doc = {
                 "message": f"Registry key parsing failed: {e}",
                 "raw_event_line": event.get("event_raw_string")

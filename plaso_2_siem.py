@@ -6,8 +6,10 @@ import json
 import re
 import os
 import traceback
+import time
+from datetime import timedelta
 from elastic_uploader import ElasticUploader
-from types import GeneratorType  # Importation pour identifier explicitement les générateurs
+from types import GeneratorType
 
 from plaso_processors.base_processor import BaseEventProcessor
 from plaso_processors.evtx_processor import PlasoEvtxProcessor
@@ -33,45 +35,45 @@ class PlasoPipeline:
     """
 
     def __init__(self, case_name, machine_name, timeline_path, es_hosts, es_user, es_pass, chunk_size, verify_ssl,
-                 es_timeout, thread_count, upload_mode):
+                 es_timeout, thread_count, mode):
         self.case_name = self._sanitize_for_index(case_name)
         self.machine_name = machine_name.lower().replace(" ", "_")
         self.timeline_path = timeline_path
         self.chunk_size = chunk_size
-        # MISE À JOUR : Ajout du préfixe 'plaso_'
+
         self.index_prefix = f"plaso_{self.case_name}_{self.machine_name}"
 
-        # Passage du timeout, thread_count et mode d'upload au client Elasticsearch
-        self.uploader = ElasticUploader(es_hosts, es_user, es_pass, verify_ssl, es_timeout, thread_count, upload_mode)
+        self.uploader = ElasticUploader(es_hosts, es_user, es_pass, verify_ssl, es_timeout, thread_count, mode)
 
         # MAPPING VERS LES NOUVEAUX INDEX PLUS LARGES
-        # La clé est le type d'artefact (pour sélectionner le bon processeur)
-        # La valeur est la regex Plaso pour identifier l'artefact.
+        # IMPORTANT : L'ordre est crucial. Les regex les plus spécifiques doivent être testées AVANT les regex génériques.
         self.parser_regex_map = {
-            # EVTX
+            # --- PROCESS (Artefacts d'exécution - Prioritaires car souvent 'winreg') ---
+            "amcache": re.compile(r'winreg/amcache'),  # Spécifique (winreg)
+            "userassist": re.compile(r'userassist'),  # Spécifique (winreg)
+            "appcompatcache": re.compile(r'appcompatcache'),
+            "srum": re.compile(r'esedb/srum'),
+            "prefetch": re.compile(r'prefetch'),
+
+            # --- HIVE SPÉCIFIQUES (Registre Windows) ---
+            "runkey": re.compile(r'winreg/windows_run'),  # Spécifique
+            "usb": re.compile(r'winreg/windows_usb_devices'),  # Spécifique
+            "mru": re.compile(r'winreg/(bagmru|mrulistex)'),  # Spécifique
+
+            # --- HIVE GÉNÉRIQUE (Registre Windows - Doit être après les spécifiques) ---
+            "hive": re.compile(r'winreg'),  # Générique (attrape tout le reste de winreg)
+
+            # --- EVTX ---
             "evtx": re.compile(r'winevtx'),
 
-            # HIVE (Registre Windows)
-            "runkey": re.compile(r'winreg/windows_run'),
-            "usb": re.compile(r'winreg/windows_usb_devices'),
-            "mru": re.compile(r'winreg/(bagmru|mrulistex)'),
-            "hive": re.compile(r'winreg'),  # <-- Doit être APRÈS les 'winreg' spécifiques
-
-            # PROCESS (Artefacts d'exécution)
-            "srum": re.compile(r'esedb/srum'),
-            "amcache": re.compile(r'winreg/amcache'),
-            "appcompatcache": re.compile(r'appcompatcache'),
-            "prefetch": re.compile(r'prefetch'),
-            "userassist": re.compile(r'userassist'),
-
-            # BROWSER_ARTEFACTS
+            # --- BROWSER ---
             "browser_history": re.compile(r'(sqlite/((chrome|firefox|edge).*history))'),
 
-            # FILES (Artefacts de système de fichiers)
+            # --- FILES ---
             "lnk": re.compile(r'lnk'),
             "mft": re.compile(r'(filestat)|(usnjrnl)|(mft)'),
 
-            # OTHER / FALLBACK
+            # --- OTHER / FALLBACK ---
             "other": re.compile(r'.*')  # Prend tout le reste
         }
 
@@ -80,7 +82,7 @@ class PlasoPipeline:
             "evtx": "evtx",
             "runkey": "hive",
             "usb": "hive",
-            "mru": "hive",  # Ajouté aux HIVE
+            "mru": "hive",
             "hive": "hive",
             "srum": "process",
             "amcache": "process",
@@ -116,12 +118,10 @@ class PlasoPipeline:
 
     def identify_artefact_type(self, event: dict) -> str:
         parser = event.get("parser", "")
-        # IMPORTANT: Vérifier les regex dans l'ordre de la map pour que les plus spécifiques passent d'abord
+        # La boucle respecte l'ordre d'insertion du dictionnaire (Python 3.7+)
         for key, value_regex in self.parser_regex_map.items():
             if re.search(value_regex, parser):
                 return key
-        # Si rien n'est trouvé (ne devrait pas arriver avec la dernière regex `.*`),
-        # on retourne 'other'
         return "other"
 
     def run(self):
@@ -129,14 +129,16 @@ class PlasoPipeline:
         print(f"  Fichier Timeline : {self.timeline_path}")
         print(f"  Index Prefix     : {self.index_prefix}")
         print(f"  Taille des Lots  : {self.chunk_size}")
-        print(f"  Mode d'Upload    : {self.uploader.upload_mode.upper()}")
+        print(f"  Mode d'envoi     : {self.uploader.mode}")
+        print(f"  Timeout (s)      : {self.uploader.es_timeout}")
         print("---------------------\n")
 
         # Générer et envoyer les actions
         actions_generator = self._process_timeline_file()
 
-        # Mettre en place les templates ES pour les nouvelles catégories
+        # Mettre en place les templates ES pour les nouvelles catégories (Priorité 400)
         self.uploader.setup_templates(
+            priority=400,
             evtx=f"{self.index_prefix}_evtx*",
             hive=f"{self.index_prefix}_hive*",
             process=f"{self.index_prefix}_process*",
@@ -145,7 +147,6 @@ class PlasoPipeline:
             others=f"{self.index_prefix}_others*"
         )
 
-        # Appel de la fonction bulk_upload (qui gère parallel ou streaming)
         self.uploader.bulk_upload(actions_generator, self.chunk_size)
 
     def _process_timeline_file(self):
@@ -168,18 +169,13 @@ class PlasoPipeline:
                         artefact_type_key = self.identify_artefact_type(event)
                         processor = self.processors.get(artefact_type_key, self.processors["other"])
 
-                        # Le résultat peut être un générateur (MRU, Registry) ou un tuple unique (les autres)
                         processor_result = processor.process_event(event)
 
-                        # CORRECTION FINALE : Distinguer le générateur du tuple simple.
                         if isinstance(processor_result, GeneratorType):
-                            # C'est un générateur (cas MRU/Registry dénormalisé)
                             events_to_yield = processor_result
                         elif isinstance(processor_result, tuple) and len(processor_result) == 2:
-                            # C'est un tuple simple (document, clé_specifique) - Cas MFT, LNK, EVTX, etc.
                             events_to_yield = [processor_result]
                         else:
-                            # Cas d'erreur : le processeur a retourné un type incorrect.
                             print(
                                 f"[Attention] Le processeur '{artefact_type_key}' a retourné un résultat inattendu: {type(processor_result)}. Traitement générique de l'erreur.")
                             processed_doc = {"message": f"Processor '{artefact_type_key}' returned malformed result.",
@@ -189,12 +185,9 @@ class PlasoPipeline:
 
                         for item in events_to_yield:
                             try:
-                                # Tenter l'unpacking. C'est ici que l'erreur 'too many values' se produit.
                                 processed_doc, specific_index_key = item
                             except ValueError as ve:
-                                # Capture de l'erreur d'unpacking (ex: 3 éléments au lieu de 2 dans un générateur/itérable)
                                 print(f"[ERREUR D'UNPACKING] Échec à la ligne {it} ({artefact_type_key}). Erreur: {ve}")
-                                # Créer un document d'erreur pour ne pas perdre la donnée
                                 error_doc = {
                                     "message": f"Unpacking error: {ve}. Original item: {item}",
                                     "raw_event_line": stripped_line,
@@ -203,7 +196,6 @@ class PlasoPipeline:
                                 specific_index_key = "other"
                                 processed_doc = error_doc
                             except Exception as e:
-                                # Autres erreurs inattendues durant l'itération
                                 print(f"[ERREUR CRITIQUE] Échec à la ligne {it} ({artefact_type_key}). Erreur: {e}")
                                 error_doc = {
                                     "message": f"Critical iteration error: {e}",
@@ -259,20 +251,23 @@ def parse_arguments():
                         help="Hôte(s) Elasticsearch, séparés par des virgules.")
     parser.add_argument("--es-user", default="elastic", help="Nom d'utilisateur pour Elasticsearch.")
     parser.add_argument("--es-pass", default="changeme", help="Mot de passe pour Elasticsearch.")
-    parser.add_argument("--chunk-size", type=int, default=1000, help="Nombre de documents à envoyer par lot.")
+    parser.add_argument("--chunk-size", type=int, default=250, help="Nombre de documents à envoyer par lot.")
     parser.add_argument("--verify-ssl", action="store_true", dest="verify_ssl", default=False,
                         help="Active la vérification du certificat SSL (désactivée par défaut).")
     parser.add_argument("--es-timeout", type=int, default=60,
-                        help="Délai d'attente de lecture pour la connexion Elasticsearch (en secondes).")
-    parser.add_argument("--thread-count", type=int, default=4,
-                        help="Nombre de threads à utiliser pour l'envoi en parallèle (utilisé seulement si --mode=parallel).")
-    parser.add_argument("--mode", choices=['parallel', 'streaming'], default='parallel',
-                        help="Mode d'envoi à Elasticsearch : 'parallel' (plus rapide) ou 'streaming' (séquentiel, plus sûr).")
+                        help="Délai d'attente pour les requêtes Elasticsearch (en secondes).")
+    parser.add_argument("--thread-count", type=int, default=4, help="Nombre de threads à utiliser pour parallel_bulk.")
+    parser.add_argument("--mode", choices=['streaming', 'parallel'], default='parallel',
+                        help="Mode d'envoi vers Elasticsearch.")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_arguments()
+
+    # Démarrage du chronomètre
+    start_time = time.time()
+    print(f"[*] Démarrage du script à {time.strftime('%H:%M:%S', time.localtime(start_time))}")
 
     try:
         pipeline = PlasoPipeline(
@@ -284,9 +279,9 @@ if __name__ == "__main__":
             es_pass=args.es_pass,
             chunk_size=args.chunk_size,
             verify_ssl=args.verify_ssl,
-            es_timeout=args.es_timeout,  # Passage de l'argument timeout
-            thread_count=args.thread_count,  # Passage du nombre de threads
-            upload_mode=args.mode  # Passage du mode d'upload
+            es_timeout=args.es_timeout,
+            thread_count=args.thread_count,
+            mode=args.mode
         )
         pipeline.run()
     except (ConnectionError) as e:
@@ -294,3 +289,8 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\n[ERREUR INATTENDUE] Une erreur est survenue : {e}")
         traceback.print_exc()
+    finally:
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        print(f"\n[*] Fin du traitement.")
+        print(f"[*] Temps d'exécution total : {str(timedelta(seconds=int(elapsed_time)))}")
