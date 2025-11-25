@@ -1,8 +1,8 @@
-Plaso to ELK Ingestion Pipeline
+Plaso to ELK FORENSIC Ingestion Pipeline
 ===============================
 
 This project provides a robust and modular ETL (Extract, Transform, Load) pipeline designed to ingest Plaso forensic
-timelines (JSON Lines format) into an Elasticsearch (ELK) stack. It addresses common challenges in forensic data
+timelines (JSON Lines format) from WINDOWS  into an Elasticsearch (ELK) stack. It addresses common challenges in forensic data
 ingestion such as timestamp normalization, mapping conflicts, and data volume handling.
 
 Features
