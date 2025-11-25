@@ -168,6 +168,21 @@ Data is routed to consolidated indices based on category to reduce index sprawl:
 You can filter specific artifacts within these indices using the `artefact_type` field (e.g.,
 `artefact_type: "amcache"`).
 
+DATAVIEWS EXEMPLES:
+---------------
+
+I've created dataviews to produce similar results to my other tools :
+- [WAPP](https://github.com/youhgo/WFAPP)
+- [MPP](https://github.com/youhgo/maximumPlasoTimelineParser)
+
+The goal is to provide straight forward informations to see instantly the info you are looking for.
+
+You can import all the provided dataview directly in kibana, in the saved object section just import the file : [all_view.ndjson](./kibana_dataview/all_view.ndjson)
+
+Here is an exemple of 4624 user logon dataview :
+![4624](./images/4624_dataviews.png)
+
+
 Troubleshooting
 ---------------
 
