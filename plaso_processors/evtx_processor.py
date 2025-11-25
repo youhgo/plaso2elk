@@ -20,17 +20,25 @@ class EvtxHandler:
         self.SECURITY_EVENT_HANDLERS = {
             4624: self.handle_security_logon, 4625: self.handle_security_logon_fail,
             4648: self.handle_security_logon, 4672: self.handle_4672_special_privileges,
-            4688: self.handle_security_process_created, 4720: self.handle_user_modification,
+            4688: self.handle_security_process_created,
+            4698: self.handle_security_task_created,
+            4720: self.handle_user_modification,
             4723: self.handle_user_modification, 4724: self.handle_user_modification,
             4726: self.handle_user_modification
         }
         self.POWERSHELL_EVENT_HANDLERS = {
-            400: self.handle_ps_engine_state, 600: self.handle_ps_engine_state,
+            400: self.handle_ps_engine_state,
+            600: self.handle_ps_provider_lifecycle,  # NOUVEAU: Gestion de l'event 600
             4103: self.handle_ps_module_logging, 4104: self.handle_ps_script_block,
         }
         self.SYSTEM_EVENT_HANDLERS = {7045: self.handle_system_service_install}
-        self.WMI_EVENT_HANDLERS = {5858: self.handle_wmi_failure, 5860: self.handle_wmi_activity,
-                                   5861: self.handle_wmi_activity}
+
+        self.WMI_EVENT_HANDLERS = {
+            5858: self.handle_wmi_failure,
+            5860: self.handle_wmi_activity,
+            5861: self.handle_wmi_consumer_binding
+        }
+
         self.WINDEFENDER_EVENT_HANDLERS = {1116: self.handle_windefender, 1117: self.handle_windefender,
                                            1118: self.handle_windefender, 1119: self.handle_windefender}
         self.TASKSCHEDULER_EVENT_HANDLERS = {106: self.handle_task_scheduler, 107: self.handle_task_scheduler,
@@ -60,6 +68,10 @@ class EvtxHandler:
             return parsed_output
 
         if not isinstance(data_items, list): data_items = [data_items]
+
+        # --- FIX: Always include raw Data list for unnamed parameters (like PowerShell 400/600) ---
+        parsed_output["Data"] = data_items
+
         for item in data_items:
             if isinstance(item, dict) and '@Name' in item:
                 parsed_output[item['@Name']] = item.get('#text')
@@ -110,8 +122,6 @@ class EvtxHandler:
         doc["winlog"]["event_data_str"] = json.dumps(self._get_event_data(raw_log))
         return doc
 
-    # ... (Toutes les autres fonctions handle_... de EvtxHandler sont ici) ...
-    # [ Omis pour la brièveté, mais ils sont identiques à ceux de plaso_2_siem.py ]
     def handle_security_logon(self, raw_log: dict) -> dict:
         doc = self._create_base_document(raw_log)
         data = self._get_event_data(raw_log)
@@ -129,18 +139,21 @@ class EvtxHandler:
     def handle_security_logon_fail(self, raw_log: dict) -> dict:
         doc = self._create_base_document(raw_log)
         data = self._get_event_data(raw_log)
-        failure_reasons = {"0xc000006A": "STATUS_WRONG_PASSWORD",
-                           "0xc0000072": "STATUS_ACCOUNT_DISABLED",
-                           "0xC000006A":"STATUS_WRONG_PASSWORD",
-                           "0xC0000064":"STATUS_NO_SUCH_USER",
-                           "0xC0000234": "STATUS_ACCOUNT_LOCKED_OUT",
-                           "0xC000006F": "STATUS_ACCOUNT_RESTRICTION",
-                           "0xC0000133": "STATUS_TIME_DIFFERENCE_TOO_LARGE",
-                           "0xC000019C": "STATUS_LOGON_TYPE_NOT_GRANTED",
-                           "0xC0000071": "STATUS_PASSWORD_EXPIRED",
-                           "0xC00000E5": "STATUS_UNKNOWN_LOGON_SESSION"
+        failure_reasons = {
+            "0xc000006A": "STATUS_WRONG_PASSWORD",
+            "0xc0000072": "STATUS_ACCOUNT_DISABLED",
+            "0xC000006A": "STATUS_WRONG_PASSWORD",
+            "0xC0000064": "STATUS_NO_SUCH_USER",
+            "0xC0000234": "STATUS_ACCOUNT_LOCKED_OUT",
+            "0xC000006F": "STATUS_ACCOUNT_RESTRICTION",
+            "0xC0000133": "STATUS_TIME_DIFFERENCE_TOO_LARGE",
+            "0xC000019C": "STATUS_LOGON_TYPE_NOT_GRANTED",
+            "0xC0000071": "STATUS_PASSWORD_EXPIRED",
+            "0xC00000E5": "STATUS_UNKNOWN_LOGON_SESSION",
+            "0xC000006E": "STATUS_ACCOUNT_RESTRICTION",
+            "0xC000006D": "STATUS_LOGON_FAILURE"
         }
-        status_code = data.get("Status", "").upper()
+        status_code = data.get("Status", "")
         failure_text = failure_reasons.get(status_code, status_code)
         try:
             port = int(data.get("IpPort")) if data.get("IpPort") not in ["-", "0"] else None
@@ -174,6 +187,59 @@ class EvtxHandler:
                                            }
                                 }
                     })
+        return doc
+
+    def handle_security_task_created(self, raw_log: dict) -> dict:
+        """
+        Gère l'événement 4698: A scheduled task was created.
+        Parse le XML de la tâche pour extraire la commande exécutée.
+        """
+        doc = self._create_base_document(raw_log)
+        data = self._get_event_data(raw_log)
+
+        task_name = data.get("TaskName")
+        task_content = data.get("TaskContent")  # XML Brut de la tâche
+
+        doc.update({
+            "event": {**doc["event"], "action": "scheduled_task_created", "category": "persistence"},
+            "task": {"name": task_name},
+            "user": {"name": data.get("SubjectUserName"), "domain": data.get("SubjectDomainName")}
+        })
+
+        # Parsing du XML de la tâche pour extraire l'action (Command/Arguments)
+        if task_content:
+            try:
+                # Le XML peut être échappé ou inclus directement, xmltodict gère bien les structures
+                # Il faut parfois nettoyer le XML s'il est brut dans une string
+                if task_content.startswith("<?xml"):
+                    task_xml = xmltodict.parse(task_content)
+
+                    # Navigation dans la structure XML de la tâche (Task > Actions > Exec)
+                    # Note: La structure peut varier légèrement
+                    actions = task_xml.get("Task", {}).get("Actions", {}).get("Exec", {})
+
+                    # Exec peut être une liste si plusieurs actions
+                    if isinstance(actions, list):
+                        cmds = []
+                        args_list = []
+                        for action in actions:
+                            cmds.append(action.get("Command"))
+                            args_list.append(action.get("Arguments"))
+                        doc["task"]["command"] = cmds
+                        doc["task"]["arguments"] = args_list
+                    elif isinstance(actions, dict):
+                        doc["task"]["command"] = actions.get("Command")
+                        doc["task"]["arguments"] = actions.get("Arguments")
+
+                    # Extraction du Trigger (si possible)
+                    triggers = task_xml.get("Task", {}).get("Triggers", {})
+                    doc["task"]["triggers_raw"] = json.dumps(triggers)
+
+            except Exception as e:
+                # En cas d'échec de parsing XML, on garde le contenu brut
+                doc["task"]["xml_parsing_error"] = str(e)
+                doc["task"]["content_raw"] = task_content
+
         return doc
 
     def handle_user_modification(self, raw_log: dict) -> dict:
@@ -216,26 +282,106 @@ class EvtxHandler:
         return doc
 
     def handle_ps_engine_state(self, raw_log: dict) -> dict:
+        """
+        Gère l'événement 400 (Engine State Changed) de PowerShell.
+        Parse le bloc de données textuel pour extraire les détails comme HostApplication, NewEngineState, etc.
+        """
+        doc = self._create_base_document(raw_log)
+        data = self._get_event_data(raw_log)
+
+        ps_details = {}
+        # data['Data'] est maintenant disponible grâce au correctif dans _get_event_data
+        data_block = data.get("Data")
+
+        if data_block:
+            # Dans l'Event 400, le dernier élément contient souvent les détails clé=valeur
+            # data_block peut être une liste de strings (ex: ['Available', 'None', '...details...']) ou une string unique
+            text_block = data_block[-1] if isinstance(data_block, list) else data_block
+
+            if isinstance(text_block, str):
+                for line in text_block.splitlines():
+                    if '=' in line:
+                        # Split sur le premier '=' uniquement
+                        key, val = line.split('=', 1)
+                        ps_details[key.strip()] = val.strip()
+
+        doc.update({
+            "event": {**doc["event"], "action": "powershell_engine_state_change"},
+            "powershell": {
+                "engine_state": ps_details.get("NewEngineState"),
+                "previous_engine_state": ps_details.get("PreviousEngineState"),
+                "sequence_number": ps_details.get("SequenceNumber"),
+                "host": {
+                    "name": ps_details.get("HostName"),
+                    "version": ps_details.get("HostVersion"),
+                    "id": ps_details.get("HostId")
+                },
+                "runspace_id": ps_details.get("RunspaceId"),
+                "pipeline_id": ps_details.get("PipelineId"),
+                "engine_version": ps_details.get("EngineVersion"),
+                "command": {
+                    "name": ps_details.get("CommandName"),
+                    "type": ps_details.get("CommandType"),
+                    "path": ps_details.get("CommandPath"),
+                    "line": ps_details.get("CommandLine")
+                },
+                "script_name": ps_details.get("ScriptName")
+            },
+            "process": {"command_line": ps_details.get("HostApplication")}
+        })
+        return doc
+
+    def handle_ps_provider_lifecycle(self, raw_log: dict) -> dict:
+        """
+        Gère l'événement 600 (Provider Lifecycle) de PowerShell.
+        Ex: "Provider 'Alias' is Started."
+        Parse les détails similaires à l'événement 400.
+        """
         doc = self._create_base_document(raw_log)
         data = self._get_event_data(raw_log)
 
         ps_details = {}
         data_block = data.get("Data")
-        if isinstance(data_block, list) and len(data_block) > 0:
-            for line in data_block[-1].splitlines():
-                if '=' in line:
-                    key, val = line.split('=', 1)
-                    ps_details[key.strip()] = val.strip()
+
+        if data_block:
+            # Comme pour 400, le dernier élément contient les détails
+            text_block = data_block[-1] if isinstance(data_block, list) else data_block
+
+            if isinstance(text_block, str):
+                for line in text_block.splitlines():
+                    if '=' in line:
+                        key, val = line.split('=', 1)
+                        ps_details[key.strip()] = val.strip()
+
         doc.update({
-            "event": {**doc["event"], "action": "powershell_engine_state_change"},
-            "powershell": {"engine_state": ps_details.get("NewEngineState", data.get("NewEngineState")),
-                           "host": {"name": ps_details.get("HostName"), "version": ps_details.get("HostVersion"),
-                                    "id": ps_details.get("HostId")}, "runspace_id": ps_details.get("RunspaceId")},
+            "event": {**doc["event"], "action": "powershell_provider_lifecycle"},
+            "powershell": {
+                "provider": {
+                    "name": ps_details.get("ProviderName"),
+                    "new_state": ps_details.get("NewProviderState"),
+                },
+                "sequence_number": ps_details.get("SequenceNumber"),
+                "host": {
+                    "name": ps_details.get("HostName"),
+                    "version": ps_details.get("HostVersion"),
+                    "id": ps_details.get("HostId")
+                },
+                "runspace_id": ps_details.get("RunspaceId"),
+                "pipeline_id": ps_details.get("PipelineId"),
+                "command": {
+                    "name": ps_details.get("CommandName"),
+                    "type": ps_details.get("CommandType"),
+                    "path": ps_details.get("CommandPath"),
+                    "line": ps_details.get("CommandLine")
+                },
+                "script_name": ps_details.get("ScriptName")
+            },
             "process": {"command_line": ps_details.get("HostApplication")}
         })
         return doc
 
     def handle_wmi_activity(self, raw_log: dict) -> dict:
+        """Gère les événements d'activité WMI standards (5860)."""
         doc = self._create_base_document(raw_log)
         user_data = self._get_user_data(raw_log)
         op_data = user_data.get("Operation_TemporaryEssStarted") or user_data.get("Operation_EssStarted")
@@ -251,6 +397,45 @@ class EvtxHandler:
             doc.update({"event": {**doc["event"], "action": "wmi_activity", "outcome": "success"},
                         "wmi": {"operation": data.get("Operation"), "query": data.get("Query"),
                                 "consumer": data.get("Consumer")}, "user": {"name": data.get("User")}})
+        return doc
+
+    def handle_wmi_consumer_binding(self, raw_log: dict) -> dict:
+        """
+        Gère l'événement 5861 : WMI FilterToConsumerBinding (Indicateur fort de persistance).
+        Parse le champ 'UserData' spécifique à cet événement.
+        """
+        doc = self._create_base_document(raw_log)
+        user_data = self._get_user_data(raw_log)
+        # Structure XML spécifique pour 5861
+        binding_data = user_data.get("Operation_ESStoConsumerBinding", {})
+
+        if not binding_data:
+            # Fallback si la structure attendue n'est pas trouvée
+            return self.handle_generic_evtx(raw_log)
+
+        doc.update({
+            "event": {**doc["event"], "action": "wmi_consumer_binding", "category": "persistence"},
+            "wmi": {
+                "namespace": binding_data.get("Namespace"),
+                "filter_name": binding_data.get("ESS"),  # ESS = Event Source Subscription (le nom du filtre)
+                "consumer_name": binding_data.get("CONSUMER"),
+                "binding_xml_raw": binding_data.get("PossibleCause")  # Contient souvent la définition MOF brute
+            }
+        })
+
+        # Tentative d'extraction avancée depuis 'PossibleCause' qui contient souvent la requête WQL
+        possible_cause = binding_data.get("PossibleCause", "")
+        if possible_cause:
+            # Extraction de la requête WQL
+            query_match = re.search(r'Query\s*=\s*"([^"]+)"', possible_cause, re.IGNORECASE)
+            if query_match:
+                doc["wmi"]["query"] = query_match.group(1)
+
+            # Extraction du langage (ex: WQL)
+            ql_match = re.search(r'QueryLanguage\s*=\s*"([^"]+)"', possible_cause, re.IGNORECASE)
+            if ql_match:
+                doc["wmi"]["query_language"] = ql_match.group(1)
+
         return doc
 
     def handle_wmi_failure(self, raw_log: dict) -> dict:
@@ -287,11 +472,32 @@ class EvtxHandler:
         return doc
 
     def handle_rdp_remote_success(self, raw_log: dict) -> dict:
+        """
+        Handle Event ID 1149: Remote Desktop Services: User authentication succeeded.
+        Updates to map Param1 (User), Param2 (Domain), and Param3 (Source IP) from UserData > EventXML.
+        """
         doc = self._create_base_document(raw_log)
+
+        # Default extraction using _get_event_data (sometimes works, but UserData is safer for 1149)
         data = self._get_event_data(raw_log)
-        doc.update(
-            {"event": {**doc["event"], "action": "rdp_login", "outcome": "success"}, "user": {"name": data.get("User")},
-             "source": {"ip": data.get("ClientAddress")}})
+
+        # Try to extract specifically from UserData > EventXML as shown in your example
+        user_data = self._get_user_data(raw_log)
+        event_xml = user_data.get("EventXML", {})
+
+        # Extract params from EventXML or fall back to EventData
+        # Param1: User Name
+        # Param2: Domain
+        # Param3: Source IP
+        user_name = event_xml.get("Param1") or data.get("User") or data.get("Param1")
+        domain = event_xml.get("Param2") or data.get("Domain") or data.get("Param2")
+        source_ip = event_xml.get("Param3") or data.get("ClientAddress") or data.get("Param3")
+
+        doc.update({
+            "event": {**doc["event"], "action": "rdp_login", "outcome": "success"},
+            "user": {"name": user_name, "domain": domain},
+            "source": {"ip": source_ip}
+        })
         return doc
 
     def handle_rdp_local_session(self, raw_log: dict) -> dict:
@@ -386,7 +592,6 @@ class PlasoEvtxProcessor(BaseEventProcessor):
 
             # MODIFIÉ: Stocker en tant que chaîne JSON pour éviter les conflits de mapping
             event["Data_json_string"] = json.dumps(xml_as_json)
-
 
             # --- Logique de Timestamp ---
             dt_plaso = self._parse_unix_micro_to_dt(event.get("timestamp"))

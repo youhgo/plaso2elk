@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+from datetime import datetime, timedelta, timezone
 from .base_processor import BaseEventProcessor
 
 
@@ -21,13 +22,35 @@ class PlasoBrowserHistoryProcessor(BaseEventProcessor):
             # 1. Créer un nouveau document propre
             processed_doc = {}
 
-            # 2. Gestion du Timestamp (WebKitTime est identique à FILETIME)
-            webkit_timestamp = event.get("date_time", {}).get("timestamp")
-            dt_webkit = self._parse_filetime_to_dt(webkit_timestamp)
+            # 2. Gestion du Timestamp
+            # Chrome/Edge utilisent WebKitTime (Microsecondes depuis 1601-01-01)
+            # La fonction _parse_filetime_to_dt divise par 10 (car FILETIME est en 100ns), ce qui fausse WebKitTime.
+            # Nous devons traiter WebKitTime spécifiquement.
 
-            if dt_webkit:
-                processed_doc["estimestamp"] = self._format_dt_to_es(dt_webkit)
+            date_time_obj = event.get("date_time", {})
+            timestamp_val = date_time_obj.get("timestamp")
+            class_name = date_time_obj.get("__class_name__", "")
+
+            dt_obj = None
+
+            if timestamp_val:
+                if class_name == "WebKitTime":
+                    # WebKitTime: Microsecondes depuis 1601-01-01
+                    try:
+                        epoch = datetime(1601, 1, 1, tzinfo=timezone.utc)
+                        dt_obj = epoch + timedelta(microseconds=timestamp_val)
+                    except Exception:
+                        dt_obj = None
+                else:
+                    # Tentative générique (souvent FILETIME ou autre)
+                    # Si ce n'est pas WebKitTime, on peut essayer le FILETIME standard
+                    # ou se replier sur le timestamp Plaso.
+                    dt_obj = self._parse_filetime_to_dt(timestamp_val)
+
+            if dt_obj:
+                processed_doc["estimestamp"] = self._format_dt_to_es(dt_obj)
             else:
+                # Fallback sur le timestamp normalisé par Plaso (Unix Microseconds)
                 dt_plaso = self._parse_unix_micro_to_dt(event.get("timestamp"))
                 processed_doc["estimestamp"] = self._format_dt_to_es(dt_plaso)
 
@@ -53,7 +76,7 @@ class PlasoBrowserHistoryProcessor(BaseEventProcessor):
                 "pathspec", "strings", "xml_string", "event_version",
                 "message_identifier", "offset", "provider_identifier",
                 "recovered", "timestamp", "estimestamp", "data_type",
-                "event_raw_string", "message", "parser", "query"
+                "event_raw_string", "parser", "query"
             ]
 
             # 5. Créer le sous-objet "confiné"
